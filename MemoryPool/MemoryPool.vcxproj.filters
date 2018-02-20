@@ -27,12 +27,27 @@
     <ClInclude Include="MemoryPool.h">
       <Filter>소스 파일</Filter>
     </ClInclude>
+    <ClInclude Include="main.h">
+      <Filter>소스 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="APIHook.h">
+      <Filter>소스 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="CrashDump.h">
+      <Filter>소스 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
     <ClCompile Include="main.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="APIHook.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="CrashDump.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>

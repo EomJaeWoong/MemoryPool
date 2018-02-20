@@ -52,6 +52,14 @@ private:
 		st_BLOCK_NODE *stpNextBlock;
 	};
 
+	/* **************************************************************** */
+	// 락프리 메모리풀 탑 노드.
+	/* **************************************************************** */
+	struct st_TOP_NODE
+	{
+		st_BLOCK_NODE	*pTopNode;
+		__int64			iUniqueNum;
+	};
 
 
 public:
@@ -63,65 +71,35 @@ public:
 	//				(bool) 메모리 Lock 플래그 - 중요하게 속도를 필요로 한다면 Lock.
 	// Return:
 	//////////////////////////////////////////////////////////////////////////
-	CMemoryPool(int iBlockNum, bool bLockFlag = false)
+	CMemoryPool(bool bLockFlag = false)
 	{
 		//////////////////////////////////////////////////////////////////////
 		// 초기화
 		//////////////////////////////////////////////////////////////////////
-		_lBlockCount = iBlockNum;
+		_lBlockCount = 0;
 		_lAllocCount = 0;
 		_bLockflag = bLockFlag;
 
-		InitializeSRWLock(&_srwMemoryPool);
-
 		//////////////////////////////////////////////////////////////////////
-		// 블록이 부족할 경우 동적 할당
+		// 탑 노드 할당
 		//////////////////////////////////////////////////////////////////////
-		if (0 == iBlockNum)
-		{
-			_bDynamicflag = true;
+		_pTop = (st_TOP_NODE *)_aligned_malloc(sizeof(st_TOP_NODE), 16);
+		_pTop->pTopNode = nullptr;
+		_pTop->iUniqueNum = 0;
 
-			_pTopNode = nullptr;
-		}
-
-		//////////////////////////////////////////////////////////////////////
-		// 지정된 갯수만큼 블록 생성
-		//////////////////////////////////////////////////////////////////////
-		else
-		{
-			_bDynamicflag = false;
-
-			//////////////////////////////////////////////////////////////////////
-			// 블록 사이즈
-			//////////////////////////////////////////////////////////////////////
-			int iBlockSize = sizeof(st_BLOCK_NODE) + sizeof(DATA);
-
-			//////////////////////////////////////////////////////////////////////
-			// 블록 할당 후 연결
-			//////////////////////////////////////////////////////////////////////
-			_pTopNode = (st_BLOCK_NODE *)malloc(iBlockSize * iBlockNum);
-
-			//////////////////////////////////////////////////////////////////////
-			// 페이징 복사 금지
-			//////////////////////////////////////////////////////////////////////
-			if (true == bLockFlag)
-				VirtualLock((LPVOID)_pTopNode, iBlockSize);
-
-			st_BLOCK_NODE *pFreeNode = _pTopNode;
-
-			for (int iCnt = 0; iCnt < iBlockNum; iCnt++)
-			{
-				pFreeNode->stpNextBlock = (st_BLOCK_NODE *)(((char *)pFreeNode) + iBlockSize);
-				pFreeNode = pFreeNode->stpNextBlock;
-			}
-
-			pFreeNode->stpNextBlock = NULL;
-		}
+		_iUniqueNum = 0;
 	}
 
 	virtual					~CMemoryPool()
 	{
-		free(_pTopNode);
+		st_BLOCK_NODE *pNode;
+
+		for (int iCnt = 0; iCnt < _lBlockCount; iCnt++)
+		{
+			pNode = _pTop->pTopNode;
+			_pTop->pTopNode = _pTop->pTopNode->stpNextBlock;
+			free(pNode);
+		}	
 	}
 
 
@@ -133,29 +111,39 @@ public:
 	//////////////////////////////////////////////////////////////////////////
 	DATA					*Alloc(bool bPlacementNew = true)
 	{
-		st_BLOCK_NODE *pAllocNode = nullptr;
-		DATA *pData;
+		st_BLOCK_NODE	*pAllocNode = nullptr;
+		st_TOP_NODE		stCloneTopNode;
 
-		_lAllocCount++;
+		DATA			*pData;
+
+		long			lBlockCount = _lBlockCount;
+		InterlockedIncrement((long *)&_lAllocCount);
 	
-		if (_lBlockCount < _lAllocCount)
+		//////////////////////////////////////////////////////////////////////
+		// 할당 해야 할 경우
+		//////////////////////////////////////////////////////////////////////
+		if (lBlockCount < _lAllocCount)
 		{
-			//////////////////////////////////////////////////////////////////
-			// 할당인 경우
-			//////////////////////////////////////////////////////////////////
-			if (_bDynamicflag)
-			{
-				pAllocNode = (st_BLOCK_NODE *)malloc(sizeof(st_BLOCK_NODE) + sizeof(DATA));
-				_lBlockCount++;
-			}
-
-			else				pData = nullptr;
+			pAllocNode = (st_BLOCK_NODE *)malloc(sizeof(st_BLOCK_NODE) + sizeof(DATA));
+			InterlockedIncrement((long *)&_lBlockCount);
 		}
 
 		else
 		{
-			pAllocNode = _pTopNode;
-			_pTopNode = _pTopNode->stpNextBlock;
+			__int64 iUniqueNum = InterlockedIncrement((long *)&_iUniqueNum);
+
+			do
+			{
+				stCloneTopNode.iUniqueNum	= _pTop->iUniqueNum;
+				stCloneTopNode.pTopNode		= _pTop->pTopNode;
+			} while (!InterlockedCompareExchange128(
+				(LONG64 *)_pTop,
+				iUniqueNum,
+				(LONG64)_pTop->pTopNode->stpNextBlock,
+				(LONG64 *)&stCloneTopNode
+				));
+
+			pAllocNode = stCloneTopNode.pTopNode;
 		}
 
 		pData = (DATA *)(pAllocNode + 1);
@@ -174,12 +162,25 @@ public:
 	//////////////////////////////////////////////////////////////////////////
 	bool					Free(DATA *pData)
 	{
-		st_BLOCK_NODE *pReturnNode = ((st_BLOCK_NODE *)pData) - 1;
+		st_BLOCK_NODE	*pReturnNode = ((st_BLOCK_NODE *)pData) - 1;
+		st_TOP_NODE		stCloneTopNode;
 
-		pReturnNode->stpNextBlock = _pTopNode;
-		_pTopNode = pReturnNode;
+		__int64			iUniqueNum = InterlockedIncrement((long *)&_iUniqueNum);
 
-		_lAllocCount--;
+		do
+		{
+			stCloneTopNode.iUniqueNum	= _pTop->iUniqueNum;
+			stCloneTopNode.pTopNode		= _pTop->pTopNode;
+
+			pReturnNode->stpNextBlock	= _pTop->pTopNode;
+		} while (!InterlockedCompareExchange128(
+			(LONG64 *)_pTop,
+			iUniqueNum,
+			(LONG64)pReturnNode,
+			(LONG64 *)&stCloneTopNode
+			));
+
+		InterlockedDecrement((long *)&_lAllocCount);
 
 		return true;
 	}
@@ -221,19 +222,19 @@ private:
 	//////////////////////////////////////////////////////////////////////////
 	// MemoryPool의 Top
 	//////////////////////////////////////////////////////////////////////////
-	st_BLOCK_NODE			*_pTopNode;
+	st_TOP_NODE				*_pTop;
+
+
+	//////////////////////////////////////////////////////////////////////////
+	// Top의 Unique Number
+	//////////////////////////////////////////////////////////////////////////
+	__int64					_iUniqueNum;
 
 
 	//////////////////////////////////////////////////////////////////////////
 	// Lockflag
 	//////////////////////////////////////////////////////////////////////////
 	bool					_bLockflag;
-
-
-	//////////////////////////////////////////////////////////////////////////
-	// 블록 동적 생성 모드
-	//////////////////////////////////////////////////////////////////////////
-	bool					_bDynamicflag;
 
 
 	//////////////////////////////////////////////////////////////////////////
